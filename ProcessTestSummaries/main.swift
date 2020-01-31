@@ -135,14 +135,14 @@ func validXMLString(_ string: String) -> String {
     return cleanedString
 }
 
-private func findXcResultFile(logsTestPath: String) -> String {
+private func findXcResultFiles(logsTestPath: String) -> [String] {
+    var paths = [String]()
     let suffix = ".xcresult"
-    var xcResultFile = ""
     var logsTestFiles = [String]()
     let fileManager = FileManager.default
     if fileManager.fileExists(atPath: logsTestPath) {
         if logsTestPath.hasSuffix(suffix) {
-            return logsTestPath
+            paths.append(logsTestPath)
         } else {
             do {
                 logsTestFiles = try fileManager.contentsOfDirectory(atPath: logsTestPath)
@@ -153,17 +153,20 @@ private func findXcResultFile(logsTestPath: String) -> String {
     }
     for file in logsTestFiles {
         if file.hasSuffix(suffix) {
-            xcResultFile = logsTestPath + "/" + file
-            break
+            paths.append(logsTestPath + "/" + file)
         }
     }
-    return xcResultFile
+    return paths
 }
 
-private func getXCResultFileData(logsTestPath: String) -> XCResultFile {
-    let urlToXCResult = findXcResultFile(logsTestPath: logsTestPath)
-
-    return XCResultFile(url: URL(fileURLWithPath: urlToXCResult))
+private func getXCResultFilesData(logsTestPath: String) -> [XCResultFile] {
+    var results = [XCResultFile]()
+    
+    let urlsToXCResult = findXcResultFiles(logsTestPath: logsTestPath)
+    for url in urlsToXCResult {
+        results.append(XCResultFile(url: URL(fileURLWithPath: url)))
+    }
+    return results
 }
 
 /**
@@ -343,7 +346,7 @@ func getJenkinsLastScreenshotsPath(_ lastScreenshotsPath: String, junitPath: Str
 /// - parameter lastScreenshotsPath: used to compute the Jenkins relative path to build artifacts
 /// - parameter buildUrl: Jenkins build url $BUILD_URL environment variable
 /// - parameter workspacePath: the workspace path of the repo, to be removed from stacktrace if it is found, to remain just the relative path file
-func generateJUnitReport(xcResultFileData: XCResultFile, logsTestPath: String, jUnitRepPath: String, noCrashLogs: Bool, lastScreenshotsPath: String? = nil, screenshotsCount: Int, buildUrl: String?, workspacePath: String, addDevicePrefix: Bool) {
+func generateJUnitReport(testSuitesNode: XMLElement, xcResultFileData: XCResultFile, logsTestPath: String, jUnitRepPath: String, noCrashLogs: Bool, lastScreenshotsPath: String? = nil, screenshotsCount: Int, buildUrl: String?, workspacePath: String, addDevicePrefix: Bool) {
     print("Generate JUnit report xml file from \(logsTestPath) logs test folder to \(jUnitRepPath) file")
 
     // create the needed path for saving the report
@@ -374,9 +377,7 @@ func generateJUnitReport(xcResultFileData: XCResultFile, logsTestPath: String, j
         let targetDeviceRecord = action.runDestination.targetDeviceRecord
 
         // parse the TestSummaries data and create the JUnit xml document
-        let testSuitesNode = XMLElement(name: "testsuites")
-        let jUnitXml = XMLDocument(rootElement: testSuitesNode)
-
+        
         let testDeviceModelName = targetDeviceRecord.modelName
         let testDeviceName = targetDeviceRecord.name
         let testDeviceOSVersion = targetDeviceRecord.operatingSystemVersionWithBuildNumber
@@ -387,6 +388,15 @@ func generateJUnitReport(xcResultFileData: XCResultFile, logsTestPath: String, j
 
         var totalTestsCount = 0
         var totalFailuresCount = 0
+
+        if let attr = testSuitesNode.attributes?.first(where: { (node) -> Bool in return node.name == "tests" }), let string = attr.stringValue, let integer = Int(string) {
+            totalTestsCount = integer
+        }
+        
+        if let attr = testSuitesNode.attributes?.first(where: { (node) -> Bool in return node.name == "failures" }), let string = attr.stringValue, let integer = Int(string) {
+            totalFailuresCount = integer
+        }
+        
         let testPlanRunSummary = testPlanRunSummaries!.summaries[0]
         for testableSummary in testPlanRunSummary.testableSummaries {
             // With Xcode 9, the top-level "TestName" in the testable summary is the target name
@@ -436,7 +446,7 @@ func generateJUnitReport(xcResultFileData: XCResultFile, logsTestPath: String, j
                     let testCaseName = testCase.name.replacingOccurrences(of: "()", with: "")
                     let testCaseStatus =  testCase.testStatus
 
-                    let actionTestSummary = JSON(string: xcResultFileData.getActionTestSummaryAsJsonString(id: testCase.summaryRef?.id ?? "") ?? "")
+                    let actionTestSummary = JSON(string: xcResultFileData.getActionTestSummaryAsJsonString(id: testCase.summaryRef?.id) ?? "")
                     if testCaseStatus != "Success" {
                         failuresCount += 1
                         var outputLogs = [String]()
@@ -529,20 +539,10 @@ func generateJUnitReport(xcResultFileData: XCResultFile, logsTestPath: String, j
                 testSuitesNode.addChild(testSuiteNode)
             }
         }
-
         let testSuitesTestsAttr = XMLNode.attribute(withName: "tests", stringValue: String(totalTestsCount))  as! XMLNode
         let testSuitesFailuresAttr = XMLNode.attribute(withName: "failures", stringValue: String(totalFailuresCount)) as! XMLNode
         let testSuitesNameAttr = XMLNode.attribute(withName: "name", stringValue: testDeviceDescription) as! XMLNode
         testSuitesNode.attributes = [testSuitesTestsAttr, testSuitesFailuresAttr, testSuitesNameAttr]
-
-        // finally, save the xml report
-        let xmlData = jUnitXml.xmlData(options: XMLNode.Options.nodePrettyPrint)
-        let xmlString = encodeNewLineCharInFailureElements(xml: String.init(data: xmlData, encoding: String.Encoding.utf8) ?? "")
-        let path = getFolderPathFromFilePath(jUnitRepPath)
-        let fileName = (invocationRecord.actions[0].schemeTaskName == "Action" ? "" : "(\(action.runDestination.displayName))") + URL(fileURLWithPath: jUnitRepPath).lastPathComponent
-        if (try? xmlString.write(toFile: path + fileName, atomically: true, encoding: String.Encoding.utf8)) == nil {
-            try! CustomErrorType.invalidArgument(error: "Writing xml data to file \(jUnitRepPath) failed!").throwsError()
-        }
     }
 }
 
@@ -632,13 +632,15 @@ if let screenshotsCountOptionValue = screenshotsCountOptionValue {
 var excludeIdenticalScreenshots = excludeIdenticalScreenshotsOptionValue != nil
 
 let logsTestPath = logsTestPathOptionValue!
-let xcResultFileData = getXCResultFileData(logsTestPath: logsTestPath)
+let xcResultFilesData = getXCResultFilesData(logsTestPath: logsTestPath)
 
 // save the last screenshots if --screenshotsPath option is passed
 if let screenshotsPathOptionValue = screenshotsPathOptionValue {
     argumentOptionsParser.validateOptionIsNotEmpty(optionName: screenshotsPathOption, optionValue: screenshotsPathOptionValue)
     let subDirectory = ""
-    saveLastScreenshots(xcResultFileData: xcResultFileData, logsTestPath: logsTestPath, lastScreenshotsPath: appendSubdirectoryToPath(screenshotsPathOptionValue, subDirectory: subDirectory)!, screenshotsCount: screenshotsCount, excludeIdenticalScreenshots: excludeIdenticalScreenshots)
+    for xcResultFileData in xcResultFilesData {
+        saveLastScreenshots(xcResultFileData: xcResultFileData, logsTestPath: logsTestPath, lastScreenshotsPath: appendSubdirectoryToPath(screenshotsPathOptionValue, subDirectory: subDirectory)!, screenshotsCount: screenshotsCount, excludeIdenticalScreenshots: excludeIdenticalScreenshots)
+    }
 }
 
 // generate the report if --jUnitReportPath option is passed
@@ -646,10 +648,26 @@ if let jUnitReportPathOptionValue = jUnitReportPathOptionValue {
     argumentOptionsParser.validateOptionIsNotEmpty(optionName: jUnitReportPathOption, optionValue: jUnitReportPathOptionValue)
     let addDevicePrefix = addDevicePrefixOptionValue != nil
     let path = getFolderPathFromFilePath(jUnitReportPathOptionValue)
-    let fileName = URL(fileURLWithPath: jUnitReportPathOptionValue).lastPathComponent
+    let url = URL(fileURLWithPath: jUnitReportPathOptionValue)
+    let fileName = url.lastPathComponent
 
     let subDirectory = ""
 
-    generateJUnitReport(xcResultFileData: xcResultFileData, logsTestPath: logsTestPath, jUnitRepPath: appendSubdirectoryToPath(path, subDirectory: subDirectory)! + fileName, noCrashLogs: noCrashLogs, lastScreenshotsPath: appendSubdirectoryToPath(screenshotsPathOptionValue, subDirectory: subDirectory), screenshotsCount: screenshotsCount, buildUrl: buildUrlOptionValue, workspacePath: workspacePathOptionValue ?? "", addDevicePrefix: addDevicePrefix)
+    let testSuitesNode = XMLElement(name: "testsuites")
+    for xcResultFileData in xcResultFilesData {
+        generateJUnitReport(testSuitesNode: testSuitesNode, xcResultFileData: xcResultFileData, logsTestPath: logsTestPath, jUnitRepPath: appendSubdirectoryToPath(path, subDirectory: subDirectory)! + fileName, noCrashLogs: noCrashLogs, lastScreenshotsPath: appendSubdirectoryToPath(screenshotsPathOptionValue, subDirectory: subDirectory), screenshotsCount: screenshotsCount, buildUrl: buildUrlOptionValue, workspacePath: workspacePathOptionValue ?? "", addDevicePrefix: addDevicePrefix)
+    }
+    let jUnitXml = XMLDocument(rootElement: testSuitesNode)
+
+    // finally, save the xml report
+    let xmlData = jUnitXml.xmlData(options: XMLNode.Options.nodePrettyPrint)
+    let xmlString = encodeNewLineCharInFailureElements(xml: String.init(data: xmlData, encoding: String.Encoding.utf8) ?? "")
+    
+    do {
+        try xmlString.write(to: url, atomically: true, encoding: .utf8)
+    } catch {
+        try! CustomErrorType.invalidArgument(error: "Writing xml data to file \(url.path) \(error.localizedDescription) failed!").throwsError()
+    }
+    
 
 }

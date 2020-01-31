@@ -20,7 +20,7 @@ import Foundation
 public struct ActionTestMetadata: XCResultObject {
     public let name: String
     public let identifier: String
-    public let testStatus: String
+    public let testStatus: String?
     public let duration: Double?
     public let summaryRef: Reference?
     public let performanceMetricsCount: Int?
@@ -31,7 +31,7 @@ public struct ActionTestMetadata: XCResultObject {
         do {
             name = try xcRequired(element: "name", from: json)
             identifier = try xcRequired(element: "identifier", from: json)
-            testStatus = try xcRequired(element: "testStatus", from: json)
+            testStatus = xcOptional(element: "testStatus", from: json)
             duration = xcOptional(element: "duration", from: json)
             summaryRef = xcOptional(element: "summaryRef", from: json)
             performanceMetricsCount = xcOptional(element: "performanceMetricsCount", from: json)

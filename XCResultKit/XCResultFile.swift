@@ -65,7 +65,10 @@ public class XCResultFile {
         }
     }
     
-    public func getActionTestSummaryAsJsonString(id: String) -> String? {
+    public func getActionTestSummaryAsJsonString(id: String?) -> String? {
+        guard let id = id else {
+            return nil
+        }
         return shell(command: ["-l", "-c", "xcrun xcresulttool get --path \"\(url.path)\" --id \(id) --format json"])
     }
 
